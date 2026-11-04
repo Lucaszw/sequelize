@@ -1,0 +1,38 @@
+// Registered in the global symbol registry, so they are the same symbols as @sequelize/core's `Op`.
+// Where clauses can therefore be shared between client and server code.
+export const Op = {
+  eq: Symbol.for('eq'),
+  ne: Symbol.for('ne'),
+  gte: Symbol.for('gte'),
+  gt: Symbol.for('gt'),
+  lte: Symbol.for('lte'),
+  lt: Symbol.for('lt'),
+  not: Symbol.for('not'),
+  is: Symbol.for('is'),
+  isNot: Symbol.for('isNot'),
+  in: Symbol.for('in'),
+  notIn: Symbol.for('notIn'),
+  like: Symbol.for('like'),
+  notLike: Symbol.for('notLike'),
+  iLike: Symbol.for('iLike'),
+  notILike: Symbol.for('notILike'),
+  startsWith: Symbol.for('startsWith'),
+  notStartsWith: Symbol.for('notStartsWith'),
+  endsWith: Symbol.for('endsWith'),
+  notEndsWith: Symbol.for('notEndsWith'),
+  substring: Symbol.for('substring'),
+  notSubstring: Symbol.for('notSubstring'),
+  regexp: Symbol.for('regexp'),
+  notRegexp: Symbol.for('notRegexp'),
+  iRegexp: Symbol.for('iRegexp'),
+  notIRegexp: Symbol.for('notIRegexp'),
+  between: Symbol.for('between'),
+  notBetween: Symbol.for('notBetween'),
+  overlap: Symbol.for('overlap'),
+  contains: Symbol.for('contains'),
+  contained: Symbol.for('contained'),
+  and: Symbol.for('and'),
+  or: Symbol.for('or'),
+} as const;
+
+export type OpTypes = typeof Op;

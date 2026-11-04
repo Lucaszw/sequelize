@@ -867,6 +867,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@electric-sql/pglite@npm:0.5.8":
+  version: 0.5.8
+  resolution: "@electric-sql/pglite@npm:0.5.8"
+  checksum: 10c0/02af377bb73428c1fb4559683dac0a4236d62320d5cda62ad4fc45d662a74fb011f767a161cb52b9160df734066376fc80f0d1506c2bbe9506490753fa12b532
+  languageName: node
+  linkType: hard
+
 "@emnapi/core@npm:1.10.0":
   version: 1.10.0
   resolution: "@emnapi/core@npm:1.10.0"
@@ -2876,6 +2883,29 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@sequelize/lite@workspace:packages/lite":
+  version: 0.0.0-use.local
+  resolution: "@sequelize/lite@workspace:packages/lite"
+  dependencies:
+    "@electric-sql/pglite": "npm:0.5.8"
+    "@sequelize/core": "workspace:*"
+    "@sequelize/postgres": "workspace:*"
+    "@types/chai": "npm:5.2.3"
+    "@types/mocha": "npm:10.0.10"
+    "@types/validator": "npm:^13.15.10"
+    chai: "npm:6.3.0"
+    concurrently: "npm:10.0.6"
+    mocha: "npm:12.0.3"
+    validator: "npm:^13.15.35"
+  peerDependencies:
+    "@electric-sql/pglite": ">=0.2.0"
+    "@sequelize/core": "workspace:*"
+  peerDependenciesMeta:
+    "@sequelize/core":
+      optional: true
+  languageName: unknown
+  linkType: soft
+
 "@sequelize/mariadb@workspace:packages/mariadb":
   version: 0.0.0-use.local
   resolution: "@sequelize/mariadb@workspace:packages/mariadb"
@@ -3002,7 +3032,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@sequelize/postgres@workspace:packages/postgres":
+"@sequelize/postgres@workspace:*, @sequelize/postgres@workspace:packages/postgres":
   version: 0.0.0-use.local
   resolution: "@sequelize/postgres@workspace:packages/postgres"
   dependencies:
