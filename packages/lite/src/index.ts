@@ -1,11 +1,14 @@
 export {
   CHANGE_SET_FORMAT,
   CHANGE_SET_VERSION,
+  SNAPSHOT_FORMAT,
+  SNAPSHOT_VERSION,
+  assertSnapshot,
   coalesceChanges,
   decodeValue,
   encodeValue,
 } from './changes.js';
-export type { ChangeOperation, ChangeRecord, ChangeSet } from './changes.js';
+export type { ChangeOperation, ChangeRecord, ChangeSet, Snapshot } from './changes.js';
 export type { DataType, DataTypeFactory, DataTypeInput, DefaultValueMarker } from './data-types.js';
 export {
   BaseError,
@@ -55,7 +58,10 @@ export type {
   ExportChangesOptions,
   PushChangesOptions,
   QueryOptions,
+  RemoteOptions,
+  SequelizeMode,
   SequelizeOptions,
+  SnapshotResult,
   SyncOptions,
 } from './sequelize.js';
 export type { Order, OrderItem, WhereOptions } from './sql.js';

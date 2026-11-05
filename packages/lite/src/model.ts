@@ -6,6 +6,7 @@ import type { HookCallback, ModelHookName } from './hooks.js';
 import { HookHandler, MODEL_HOOK_NAMES } from './hooks.js';
 import type { ModelAttributes, ModelOptions, NormalizedAttribute } from './model-definition.js';
 import { ModelDefinition } from './model-definition.js';
+import { Op } from './operators.js';
 import type { QueryOptions, Sequelize, SyncOptions } from './sequelize.js';
 import type { Order, WhereOptions } from './sql.js';
 import {
@@ -16,6 +17,7 @@ import {
   quoteIdentifier,
   quoteLiteral,
 } from './sql.js';
+import type { Transaction } from './transaction.js';
 import { validateAttributes } from './validation.js';
 
 export type Attributes<M extends Model> = M['_attributes'];
@@ -1272,6 +1274,72 @@ export class Model<
     this.#changed.clear();
 
     return this;
+  }
+
+  /**
+   * Replaces the rows of this table with the given (decoded) rows, without running hooks, validations,
+   * timestamps or change tracking. Rows whose primary key is in `preserve` are left untouched.
+   *
+   * @param rows
+   * @param preserve
+   * @param transaction
+   * @internal
+   */
+  static async _replaceRows(
+    rows: ReadonlyArray<Record<string, unknown>>,
+    preserve: ReadonlyArray<Record<string, unknown>>,
+    transaction: Transaction,
+  ): Promise<number> {
+    const definition = this.modelDefinition;
+    const table = quoteIdentifier(definition.table);
+    const pkKey = (row: Record<string, unknown>) =>
+      JSON.stringify(definition.primaryKeys.map(name => encodeValue(row[name])));
+
+    const deleteParameters = new Parameters();
+    const where =
+      preserve.length > 0
+        ? new WhereBuilder(definition, deleteParameters).build({
+            [Op.not]: { [Op.or]: preserve },
+          })
+        : '';
+    await this.sequelize.query(
+      `DELETE FROM ${table}${where ? ` WHERE ${where}` : ''}`,
+      deleteParameters.values,
+      { transaction },
+    );
+
+    const preserved = new Set(preserve.map(pkKey));
+    const restored = rows.filter(row => !preserved.has(pkKey(row)));
+    const columns = definition.physicalAttributes.filter(attribute =>
+      restored.some(row => row[attribute.name] !== undefined),
+    );
+    if (columns.length === 0) {
+      return 0;
+    }
+
+    const batchSize = 500;
+    for (let start = 0; start < restored.length; start += batchSize) {
+      const parameters = new Parameters();
+      const values = restored.slice(start, start + batchSize).map(
+        row =>
+          `(${columns
+            .map(attribute => {
+              const value = row[attribute.name];
+
+              return value === undefined ? 'DEFAULT' : parameters.add(bindValue(attribute, value));
+            })
+            .join(', ')})`,
+      );
+
+      // eslint-disable-next-line no-await-in-loop -- batches run sequentially in the same transaction
+      await this.sequelize.query(
+        `INSERT INTO ${table} (${columns.map(attribute => quoteIdentifier(attribute.field)).join(', ')}) VALUES ${values.join(', ')}`,
+        parameters.values,
+        { transaction },
+      );
+    }
+
+    return restored.length;
   }
 
   /**

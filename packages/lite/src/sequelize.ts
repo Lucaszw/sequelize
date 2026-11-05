@@ -1,6 +1,12 @@
-import type { ChangeRecord, ChangeSet } from './changes.js';
-import { CHANGE_SET_FORMAT, CHANGE_SET_VERSION, coalesceChanges } from './changes.js';
-import { wrapDatabaseError } from './errors.js';
+import type { ChangeRecord, ChangeSet, Snapshot } from './changes.js';
+import {
+  assertSnapshot,
+  CHANGE_SET_FORMAT,
+  CHANGE_SET_VERSION,
+  coalesceChanges,
+  decodeValues,
+} from './changes.js';
+import { SyncError, wrapDatabaseError } from './errors.js';
 import type { ModelAttributes, ModelOptions } from './model-definition.js';
 import type { Model, ModelStatic } from './model.js';
 import { Model as BaseModel } from './model.js';
@@ -8,9 +14,36 @@ import { quoteIdentifier } from './sql.js';
 import type { PGliteLike, PGliteQueryable, PGliteQueryResult } from './transaction.js';
 import { Transaction } from './transaction.js';
 
+/**
+ * - `local`: data only lives in PGlite. Nothing is recorded or synced.
+ * - `remote`: the backend is the source of truth. PGlite (usually in-memory) is loaded from `remote.pull` on `sync()`,
+ *   and every transaction is sent to `remote.push` before it commits locally, so rejected writes are rolled back.
+ * - `synced` (default): data lives in PGlite and works offline. Writes are recorded and sent with `pushChanges()`,
+ *   server state is loaded with `pullSnapshot()`.
+ */
+export type SequelizeMode = 'local' | 'remote' | 'synced';
+
+export interface RemoteOptions {
+  /** Sends a change set to the backend, e.g. a `fetch` to an endpoint calling `applyChanges` */
+  push?(changeSet: ChangeSet): unknown;
+  /** Fetches a snapshot from the backend, e.g. a `fetch` to an endpoint calling `exportSnapshot` */
+  pull?(): unknown;
+}
+
+export interface SnapshotResult {
+  /** Rows written from the snapshot */
+  restored: number;
+  /** Rows kept as-is because they have pending local changes */
+  preserved: number;
+}
+
 export interface SequelizeOptions {
   /** A PGlite instance (or PGliteWorker), or a function that creates one */
   pglite: PGliteLike | (() => PGliteLike | Promise<PGliteLike>);
+  /** See {@link SequelizeMode}. Default `synced` */
+  mode?: SequelizeMode;
+  /** How to reach the backend. Required in `remote` mode, optional defaults for `pushChanges` / `pullSnapshot` */
+  remote?: RemoteOptions;
   /** Called with every SQL query. Default: no logging */
   logging?: false | ((sql: string, parameters: readonly unknown[]) => void);
   /** Default options for all models */
@@ -67,8 +100,41 @@ export class Sequelize {
       throw new Error('The "pglite" option is required');
     }
 
+    const mode = options.mode ?? 'synced';
+    if (!['local', 'remote', 'synced'].includes(mode)) {
+      throw new Error(`Unknown mode "${String(mode)}"`);
+    }
+
+    if (mode === 'remote' && (!options.remote?.push || !options.remote.pull)) {
+      throw new Error('The "remote" mode requires the "remote.push" and "remote.pull" options');
+    }
+
     this.options = options;
     this.#pgliteOption = options.pglite;
+  }
+
+  get mode(): SequelizeMode {
+    return this.options.mode ?? 'synced';
+  }
+
+  #assertSyncable(method: string) {
+    if (this.mode === 'local') {
+      throw new SyncError(`${method} is not available in "local" mode`);
+    }
+  }
+
+  async #pushInTransaction(transaction: Transaction) {
+    if (this.mode !== 'remote') {
+      return;
+    }
+
+    const changeSet = await this.exportChanges({ transaction });
+    if (changeSet.toSeq === 0) {
+      return;
+    }
+
+    await this.options.remote!.push!(changeSet);
+    await this.acknowledgeChanges(changeSet, { transaction });
   }
 
   get changeLogTable(): string {
@@ -180,7 +246,10 @@ export class Sequelize {
         transaction = new Transaction(connection);
         this.#activeTransaction = transaction;
         try {
-          return await callback(transaction);
+          const callbackResult = await callback(transaction);
+          await this.#pushInTransaction(transaction);
+
+          return callbackResult;
         } finally {
           this.#activeTransaction = undefined;
         }
@@ -221,10 +290,15 @@ export class Sequelize {
           resolveTransaction(transaction);
 
           const outcome = await settled;
-          this.#activeTransaction = undefined;
-          if (outcome === 'rollback') {
-            // rejecting makes PGlite roll back
-            throw rollbackSignal;
+          try {
+            if (outcome === 'rollback') {
+              // rejecting makes PGlite roll back
+              throw rollbackSignal;
+            }
+
+            await this.#pushInTransaction(transaction);
+          } finally {
+            this.#activeTransaction = undefined;
           }
         })
         .then(
@@ -264,7 +338,8 @@ export class Sequelize {
   }
 
   /**
-   * Creates the tables of all defined models, plus the change log tables
+   * Creates the tables of all defined models, plus the change log tables.
+   * In `remote` mode, also loads the backend's state with {@link pullSnapshot}.
    *
    * @param options
    */
@@ -274,6 +349,10 @@ export class Sequelize {
     for (const model of Object.values(this.models)) {
       // eslint-disable-next-line no-await-in-loop -- tables are created in definition order, for foreign keys
       await model.sync(options);
+    }
+
+    if (this.mode === 'remote') {
+      await this.pullSnapshot(undefined, options);
     }
 
     return this;
@@ -327,7 +406,7 @@ export class Sequelize {
     entries: ReadonlyArray<Omit<ChangeRecord, 'seq' | 'at'>>,
     transaction: Transaction,
   ): Promise<void> {
-    if (entries.length === 0) {
+    if (entries.length === 0 || this.mode === 'local') {
       return;
     }
 
@@ -421,6 +500,7 @@ RETURNING "value"`,
    * @param options
    */
   async exportChanges(options: ExportChangesOptions & QueryOptions = {}): Promise<ChangeSet> {
+    this.#assertSyncable('exportChanges');
     const changes = await this.getPendingChanges(options);
     const clientId = await this.getClientId(options);
 
@@ -461,22 +541,94 @@ RETURNING "value"`,
    *
    * Returns `null` if there was nothing to send, or the value returned by `send`.
    *
-   * @param send
+   * @param send Defaults to the `remote.push` option
    * @param options
    */
-  async pushChanges<T>(
-    send: (changeSet: ChangeSet) => Promise<T> | T,
+  async pushChanges<T = unknown>(
+    send?: (changeSet: ChangeSet) => Promise<T> | T,
     options: PushChangesOptions = {},
   ): Promise<T | null> {
+    this.#assertSyncable('pushChanges');
+    const sender = send ?? (this.options.remote?.push as ((changeSet: ChangeSet) => T) | undefined);
+    if (!sender) {
+      throw new SyncError('pushChanges requires a send function or the "remote.push" option');
+    }
+
     const changeSet = await this.exportChanges(options);
     if (changeSet.toSeq === 0) {
       return null;
     }
 
-    const result = await send(changeSet);
+    const result = await sender(changeSet);
     await this.acknowledgeChanges(changeSet);
 
     return result;
+  }
+
+  /**
+   * Fetches a snapshot of the backend (created with `exportSnapshot` from `@sequelize/lite/server`) and loads it with
+   * {@link applySnapshot}.
+   *
+   * @param fetchSnapshot Defaults to the `remote.pull` option
+   * @param options
+   */
+  async pullSnapshot(
+    fetchSnapshot?: () => unknown,
+    options: QueryOptions = {},
+  ): Promise<SnapshotResult> {
+    this.#assertSyncable('pullSnapshot');
+    const pull = fetchSnapshot ?? this.options.remote?.pull;
+    if (!pull) {
+      throw new SyncError('pullSnapshot requires a fetch function or the "remote.pull" option');
+    }
+
+    return this.applySnapshot(await pull(), options);
+  }
+
+  /**
+   * Replaces the local rows of every model in the snapshot with the snapshot's rows, in one transaction.
+   * Rows with pending local changes are kept, so offline edits are not lost. Models that are not in the snapshot
+   * (like local-only models) are left untouched. Attributes the client does not define are ignored.
+   *
+   * No hooks or validations run, and nothing is recorded in the change log.
+   *
+   * @param snapshot
+   * @param options
+   */
+  async applySnapshot(
+    snapshot: Snapshot | unknown,
+    options: QueryOptions = {},
+  ): Promise<SnapshotResult> {
+    this.#assertSyncable('applySnapshot');
+    assertSnapshot(snapshot);
+
+    for (const name of Object.keys(snapshot.models)) {
+      if (!this.isDefined(name)) {
+        throw new SyncError(
+          `Snapshot contains model "${name}", which is not defined on the client`,
+        );
+      }
+    }
+
+    return this._withTransaction(options, async transaction => {
+      const pending = await this.getPendingChanges({ transaction });
+      const result: SnapshotResult = { restored: 0, preserved: 0 };
+
+      for (const [name, rows] of Object.entries(snapshot.models)) {
+        const preserve = pending
+          .filter(change => change.model === name)
+          .map(change => decodeValues(change.pk));
+        result.preserved += new Set(preserve.map(pk => JSON.stringify(pk))).size;
+        // eslint-disable-next-line no-await-in-loop -- models are restored in order, in one transaction
+        result.restored += await this.models[name]._replaceRows(
+          rows.map(row => decodeValues(row)),
+          preserve,
+          transaction,
+        );
+      }
+
+      return result;
+    });
   }
 
   /**

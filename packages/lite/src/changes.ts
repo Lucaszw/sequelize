@@ -1,3 +1,5 @@
+import { SyncError } from './errors.js';
+
 export const CHANGE_SET_FORMAT = 'sequelize-lite/changes';
 export const CHANGE_SET_VERSION = 1;
 
@@ -31,6 +33,54 @@ export interface ChangeSet {
   toSeq: number;
   exportedAt: string;
   changes: ChangeRecord[];
+}
+
+export const SNAPSHOT_FORMAT = 'sequelize-lite/snapshot';
+export const SNAPSHOT_VERSION = 1;
+
+/**
+ * The server's current rows, keyed by model name, created with `exportSnapshot` from `@sequelize/lite/server`.
+ * Loaded on the client with `pullSnapshot` / `applySnapshot`.
+ */
+export interface Snapshot {
+  format: typeof SNAPSHOT_FORMAT;
+  version: typeof SNAPSHOT_VERSION;
+  exportedAt: string;
+  /** JSON-encoded rows (see {@link encodeValue}), keyed by attribute name */
+  models: Record<string, Array<Record<string, unknown>>>;
+}
+
+/**
+ * Throws if the value is not a well-formed snapshot
+ *
+ * @param value
+ */
+export function assertSnapshot(value: unknown): asserts value is Snapshot {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new SyncError('Snapshot must be an object');
+  }
+
+  const snapshot = value as Record<string, unknown>;
+  if (snapshot.format !== SNAPSHOT_FORMAT) {
+    throw new SyncError(`Unknown snapshot format: ${String(snapshot.format)}`);
+  }
+
+  if (snapshot.version !== SNAPSHOT_VERSION) {
+    throw new SyncError(`Unsupported snapshot version: ${String(snapshot.version)}`);
+  }
+
+  const models = snapshot.models;
+  if (
+    typeof models !== 'object' ||
+    models === null ||
+    Object.values(models).some(
+      rows =>
+        !Array.isArray(rows) ||
+        rows.some(row => typeof row !== 'object' || row === null || Array.isArray(row)),
+    )
+  ) {
+    throw new SyncError('Malformed snapshot');
+  }
 }
 
 function bytesToBase64(bytes: Uint8Array): string {

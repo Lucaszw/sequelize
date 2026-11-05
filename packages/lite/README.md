@@ -1,14 +1,17 @@
 # @sequelize/lite
 
 A lightweight, browser-side subset of Sequelize backed by [PGlite](https://pglite.dev) (Postgres compiled to WASM), for offline support.
-Writes are recorded in a local change log. You export the log as a JSON blob and replay it on a regular `@sequelize/core` (Postgres) backend.
+Writes are recorded in a local change log. You export the log as a JSON blob and replay it on a regular `@sequelize/core` (Postgres) backend,
+and load the backend's state back with a snapshot.
+
+It runs in one of three [modes](#modes): `local` (front end only, never syncs), `remote` (backend only) or `synced` (local ↔ backend, the default).
 
 - **Client** (`@sequelize/lite`): model definition, `sync`, create / read / update / destroy, hooks, validation, transactions and `Op` where clauses.
   It does not import `@sequelize/core`. It is about 24 KB gzipped, not counting PGlite.
 - **Server** (`@sequelize/lite/server`): `applyChanges()` replays a change set through your real `@sequelize/core` models, in one transaction.
+  `exportSnapshot()` exports the rows a user may see. Both only touch the tables, columns and rows you allow, see [Keeping data private](#keeping-data-private).
 
-Not supported: associations / `include`, scopes, paranoid models, other dialects, pulling server changes down to the client,
-and multiple sessions editing the same data. See [Limitations](#limitations).
+Not supported: associations / `include`, scopes, paranoid models, other dialects, and multiple sessions editing the same data. See [Limitations](#limitations).
 
 **Contents**
 
@@ -22,8 +25,11 @@ and multiple sessions editing the same data. See [Limitations](#limitations).
 - [Validation](#validation)
 - [Hooks](#hooks)
 - [Transactions](#transactions)
+- [Modes](#modes)
 - [Syncing to the backend](#syncing-to-the-backend)
 - [Server: `applyChanges`](#server-applychanges)
+- [Server: `exportSnapshot`](#server-exportsnapshot)
+- [Keeping data private](#keeping-data-private)
 - [Example app](#example-app)
 - [Limitations](#limitations)
 - [API reference](#api-reference)
@@ -374,6 +380,41 @@ Change log entries are written in the same transaction as the data, so a rolled-
 PGlite has a single connection, so queries made while a managed transaction callback is running use that transaction even without the
 `transaction` option. Passing it explicitly is still clearer.
 
+## Modes
+
+```ts
+const remote = {
+  async push(changeSet) {
+    const response = await fetch('/api/sync', {
+      method: 'POST',
+      body: JSON.stringify(changeSet),
+      headers,
+    });
+    if (!response.ok) throw new Error(await response.text());
+  },
+  async pull() {
+    const response = await fetch('/api/snapshot', { headers });
+    if (!response.ok) throw new Error(await response.text());
+    return response.json();
+  },
+};
+
+new Sequelize({ pglite: new PGlite('idb://app'), mode: 'local' }); // front end only
+new Sequelize({ pglite: new PGlite(), mode: 'remote', remote }); // backend only
+new Sequelize({ pglite: new PGlite('idb://app'), mode: 'synced', remote }); // local <-> backend (default mode)
+```
+
+| Mode               | Source of truth | Writes                                                                                                     | Restoring state                                                                                             |
+| ------------------ | --------------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `local`            | PGlite          | Local only. Nothing is recorded, `exportChanges` / `pushChanges` / `pullSnapshot` throw.                   | Reopen the same persistent PGlite (`idb://...`).                                                            |
+| `remote`           | Backend         | Each transaction is sent to `remote.push` before it commits locally. If the push fails, it is rolled back. | `sync()` loads the backend's state from `remote.pull`. Use an in-memory PGlite.                             |
+| `synced` (default) | Both            | Local, recorded in the change log, sent later with `pushChanges()`.                                        | Reopen the same persistent PGlite (data and pending changes are kept), or `pullSnapshot()` on a new device. |
+
+- `remote` mode needs both `remote.push` and `remote.pull`. It still uses PGlite as its query engine, so the same models, hooks and validation run on the
+  client, then the server runs its own. It does not work offline: writes fail when the backend can't be reached. Call `pullSnapshot()` again to pick up
+  changes made elsewhere.
+- In `synced` mode, `remote` is optional and only provides the defaults for `pushChanges()` and `pullSnapshot()`.
+
 ## Syncing to the backend
 
 ### How it works
@@ -467,6 +508,24 @@ await Todo.update({ seen: true }, { where: { seen: false }, trackChanges: false 
 
 Use the same `trackChanges: false` when you save data that came _from_ the server, so it isn't sent back.
 
+### Loading the server's state
+
+`pullSnapshot(fetchSnapshot?)` fetches a snapshot created by [`exportSnapshot`](#server-exportsnapshot) (default: `remote.pull`) and loads it with
+`applySnapshot(snapshot)`, in one transaction:
+
+```ts
+await sequelize.pushChanges(); // send local changes first
+const { restored, preserved } = await sequelize.pullSnapshot();
+```
+
+- Each model in the snapshot is replaced with the snapshot's rows. Rows that are not in the snapshot are deleted locally.
+- Rows with **pending local changes are kept as they are** (including pending deletes), so offline edits are not lost. They are sent with the next push.
+- Models that are not in the snapshot (local-only models, for example) are left untouched. Columns the client model doesn't define are ignored. A model
+  the client doesn't define is an error.
+- No hooks or validations run, and nothing is added to the change log. Timestamps are kept as they are on the server.
+- Client columns that the snapshot doesn't include get their default value, so they must be nullable or have a default (or the client model should use
+  `timestamps: false` if the server doesn't export them).
+
 ### Change set format
 
 ```json
@@ -523,24 +582,18 @@ const Todo = sequelize.define('Todo', {
   id: { type: DataTypes.UUID, primaryKey: true },
   title: { type: DataTypes.STRING, allowNull: false, validate: { len: [1, 200] } },
   done: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
-  ownerId: { type: DataTypes.UUID, allowNull: false }, // server-only
+  ownerId: { type: DataTypes.UUID, allowNull: false },
+  internalNotes: DataTypes.TEXT, // server-only
+});
+
+// what the logged-in user may read and write, see "Keeping data private"
+const syncModels = user => ({
+  Todo: { model: Todo, exclude: ['internalNotes'], where: { ownerId: user.id } },
 });
 
 app.post('/api/sync', requireUser, express.json({ limit: '5mb' }), async (req, res) => {
   try {
-    const result = await applyChanges(sequelize, req.body, {
-      models: [Todo],
-      transform(change, { existing }) {
-        // users can only touch their own rows
-        if (existing && existing.get('ownerId') !== req.user.id) {
-          return null; // skip
-        }
-
-        // never trust the owner sent by the client
-        return change.data ? { ...change, data: { ...change.data, ownerId: req.user.id } } : change;
-      },
-    });
-    res.json(result);
+    res.json(await applyChanges(sequelize, req.body, { models: syncModels(req.user) }));
   } catch (error) {
     res
       .status(error.name === 'SequelizeValidationError' ? 422 : 400)
@@ -554,13 +607,14 @@ What `applyChanges` does:
 - It checks the change set's shape and format version first. Anything else is rejected.
 - Changes are applied in order, in a single transaction, through the server models (`create`, `instance.update`, `instance.destroy`), so server
   hooks and validation run. If one change fails, nothing is applied and the error is thrown.
-- Only models listed in `models` can be written to. A change to another model, or to an attribute the server model doesn't have, rejects the whole change set.
+- Only models listed in `models` can be written to. A change to another model, to an attribute the server model doesn't have or the config doesn't allow,
+  or to a row outside of `writeWhere`, rejects the whole change set with a `SyncError`.
 
 Options:
 
 | Option        | Default  | Description                                                                                                                                                                                                                                               |
 | ------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `models`      | required | The models clients can write to: `[Todo, 'Note']`, or a map from client model name to server model (`{ Todo: ServerTodo }`) when the names differ.                                                                                                        |
+| `models`      | required | The models clients can write to: `[Todo, 'Note']`, a map from client model name to server model (`{ Todo: ServerTodo }`) when the names differ, or a map to [sync configs](#keeping-data-private) (`{ Todo: { model: Todo, exclude, where } }`).          |
 | `transform`   |          | `(change, { model, existing, transaction, changeSet }) => change \| null \| false`, can be async. Called before each change with the current server row (or `null`). Return a modified change, `null`/`false` to skip it, or throw to reject all of them. |
 | `onMissing`   | `'skip'` | What to do with an `update` for a row that doesn't exist on the server (deleted elsewhere, or never synced): `'skip'`, `'create'` (create it from the partial data) or `'error'`.                                                                         |
 | `transaction` |          | Run inside your own transaction instead of a new one, e.g. to also write an audit log.                                                                                                                                                                    |
@@ -607,6 +661,69 @@ await applyChanges(sequelize, changeSet, {
 });
 ```
 
+## Server: `exportSnapshot`
+
+```ts
+import { exportSnapshot } from '@sequelize/lite/server';
+
+app.get('/api/snapshot', requireUser, async (req, res) => {
+  res.json(await exportSnapshot(sequelize, { models: syncModels(req.user) }));
+});
+```
+
+`exportSnapshot(sequelize, { models, transaction? })` reads every listed model in one transaction and returns a JSON-serializable snapshot:
+
+```json
+{
+  "format": "sequelize-lite/snapshot",
+  "version": 1,
+  "exportedAt": "2026-11-05T18:00:00.000Z",
+  "models": { "Todo": [{ "id": "a1…", "title": "Groceries", "done": false, "ownerId": "u1…" }] }
+}
+```
+
+Values are encoded like in change sets. Snapshots contain all rows the user may see, so for large tables narrow them down with `where`.
+
+## Keeping data private
+
+Both `applyChanges` and `exportSnapshot` take the same `models` option. Build it per request, so it can depend on the logged-in user,
+and use it for both endpoints:
+
+```ts
+import { Op } from '@sequelize/core';
+
+const syncModels = user => ({
+  Todo: {
+    model: Todo,
+    exclude: ['internalNotes'],
+    where: { [Op.or]: [{ ownerId: user.id }, { public: true }] }, // rows the user can read
+    writeWhere: { ownerId: user.id }, // rows the user can write
+  },
+  User: {
+    model: User,
+    attributes: ['name', 'avatarUrl', 'email'],
+    transform: (row, { instance }) =>
+      instance.get('id') === user.id ? row : { ...row, email: null },
+  },
+  // Session, AuditLog, ... are not listed, so they are never read or written
+});
+```
+
+| Config       | Read (`exportSnapshot`)                                                                                                                                  | Write (`applyChanges`)                                                                                     |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `models`     | Only listed models are exported.                                                                                                                         | Changes to other models are rejected.                                                                      |
+| `attributes` | Allow-list: only these columns (and the primary key) are selected.                                                                                       | Changes to other attributes are rejected.                                                                  |
+| `exclude`    | All columns except these are selected.                                                                                                                   | Changes to these attributes are rejected.                                                                  |
+| `where`      | Only matching rows are selected (in SQL, other rows are never loaded).                                                                                   | Used as `writeWhere` if that isn't set.                                                                    |
+| `writeWhere` |                                                                                                                                                          | The row must match before an update / destroy, and after a create / update, or the change set is rejected. |
+| `transform`  | `(row, { model, instance, transaction })`: change or hide values per row (return `null` to leave the row out). It can't add columns that aren't allowed. | Not used. Use the `transform` option of `applyChanges` instead.                                            |
+
+- `exportSnapshot` requires `attributes` or `exclude` for every model, so a column added later (like `password`) is not exported by accident.
+  Use `exclude: []` to export every column.
+- Unknown attribute names in `attributes` / `exclude` (a typo like `pasword`) throw, and the primary key can't be excluded.
+- `writeWhere` is checked after the write too, so a client can't create a row for another user or move its own row to another user.
+- A row a user can read is not automatically writable: with the config above, other users' public todos can be read but not changed.
+
 ## Example app
 
 [`example/`](./example) is a small offline todo app: the client stores todos in PGlite in IndexedDB, and a Node server applies the changes to Postgres.
@@ -624,8 +741,8 @@ The server column shows what reached Postgres, with a `syncedAt` value set by a 
 
 ## Limitations
 
-- **One way only.** Changes go from the client to the server. Nothing brings server-side changes down to the client yet. If you need that, fetch the data
-  from your API and save it with `trackChanges: false`.
+- **Snapshots, not incremental pulls.** `pullSnapshot()` downloads every row the user may see, not just what changed since the last pull.
+- **`remote` mode doesn't work offline**, and each write is a request to the backend.
 - **No automatic conflict handling.** The last change applied wins, unless you decide otherwise in `transform`.
 - **Rejected changes block the queue** until the row is fixed, the change is skipped on the server, or the changes are discarded.
 - **Schema changes:** `sync({ alter: true })` only adds columns.
@@ -634,8 +751,8 @@ The server column shows what reached Postgres, with a `syncedAt` value set by a 
 
 ## API reference
 
-**`Sequelize`**: `define`, `isDefined`, `model`, `models`, `sync`, `drop`, `transaction`, `query`, `close`, `getPGlite`, `exportChanges`, `pushChanges`,
-`acknowledgeChanges`, `countPendingChanges`, `getPendingChanges`, `getClientId`, `discardChanges`.
+**`Sequelize`**: `mode`, `define`, `isDefined`, `model`, `models`, `sync`, `drop`, `transaction`, `query`, `close`, `getPGlite`, `exportChanges`, `pushChanges`,
+`acknowledgeChanges`, `countPendingChanges`, `getPendingChanges`, `getClientId`, `discardChanges`, `pullSnapshot`, `applySnapshot`.
 
 **`Model` (static)**: `init`, `build`, `create`, `bulkCreate`, `findAll`, `findOne`, `findByPk`, `findOrCreate`, `findAndCountAll`, `count`, `update`,
 `destroy`, `sync`, `drop`, `addHook`, `removeHook`, `hasHook`, and a shortcut for each hook (`Model.beforeCreate(fn)`, ...).
@@ -644,6 +761,6 @@ The server column shows what reached Postgres, with a `syncedAt` value set by a 
 
 **Errors**: `BaseError`, `ValidationError` (with `errors: ValidationErrorItem[]`), `DatabaseError`, `UniqueConstraintError`, `ForeignKeyConstraintError`, `EmptyResultError`, `SyncError`.
 
-**Change helpers**: `coalesceChanges`, `encodeValue`, `decodeValue`, `CHANGE_SET_FORMAT`, `CHANGE_SET_VERSION`.
+**Change helpers**: `coalesceChanges`, `encodeValue`, `decodeValue`, `assertSnapshot`, `CHANGE_SET_FORMAT`, `CHANGE_SET_VERSION`, `SNAPSHOT_FORMAT`, `SNAPSHOT_VERSION`.
 
-**`@sequelize/lite/server`**: `applyChanges(sequelize, changeSet, options)`, `assertChangeSet(value)`.
+**`@sequelize/lite/server`**: `applyChanges(sequelize, changeSet, options)`, `exportSnapshot(sequelize, options)`, `assertChangeSet(value)`.
