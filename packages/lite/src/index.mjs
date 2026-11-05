@@ -1,0 +1,24 @@
+import Pkg from './index.js';
+
+export const BaseError = Pkg.BaseError;
+export const CHANGE_SET_FORMAT = Pkg.CHANGE_SET_FORMAT;
+export const CHANGE_SET_VERSION = Pkg.CHANGE_SET_VERSION;
+export const DataTypes = Pkg.DataTypes;
+export const DatabaseError = Pkg.DatabaseError;
+export const EmptyResultError = Pkg.EmptyResultError;
+export const ForeignKeyConstraintError = Pkg.ForeignKeyConstraintError;
+export const HookHandler = Pkg.HookHandler;
+export const MODEL_HOOK_NAMES = Pkg.MODEL_HOOK_NAMES;
+export const Model = Pkg.Model;
+export const ModelDefinition = Pkg.ModelDefinition;
+export const Op = Pkg.Op;
+export const Sequelize = Pkg.Sequelize;
+export const SyncError = Pkg.SyncError;
+export const Transaction = Pkg.Transaction;
+export const UniqueConstraintError = Pkg.UniqueConstraintError;
+export const VALIDATORS = Pkg.VALIDATORS;
+export const ValidationError = Pkg.ValidationError;
+export const ValidationErrorItem = Pkg.ValidationErrorItem;
+export const coalesceChanges = Pkg.coalesceChanges;
+export const decodeValue = Pkg.decodeValue;
+export const encodeValue = Pkg.encodeValue;

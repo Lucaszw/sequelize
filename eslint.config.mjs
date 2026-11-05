@@ -60,6 +60,7 @@ export default [
       '.nx/**/*',
       'packages/cli/migrations/**/*',
       'packages/cli/seeds/**/*',
+      'packages/lite/example/dist/**/*',
     ],
   },
   ...ephysPreset,
@@ -337,6 +338,14 @@ export default [
     rules: {
       'no-console': 'off',
       // sscce.ts imports workspace packages that are not listed in the root package.json
+      'import/no-extraneous-dependencies': 'off',
+    },
+  },
+  {
+    files: ['packages/lite/example/**/*'],
+    rules: {
+      'no-console': 'off',
+      // the example imports workspace packages & build tools that are not dependencies of @sequelize/lite
       'import/no-extraneous-dependencies': 'off',
     },
   },
