@@ -30,6 +30,7 @@ Not supported: associations / `include`, scopes, paranoid models, other dialects
 - [Server: `applyChanges`](#server-applychanges)
 - [Server: `exportSnapshot`](#server-exportsnapshot)
 - [Keeping data private](#keeping-data-private)
+- [Agent skill](#agent-skill)
 - [Example app](#example-app)
 - [Limitations](#limitations)
 - [API reference](#api-reference)
@@ -723,6 +724,12 @@ const syncModels = user => ({
 - Unknown attribute names in `attributes` / `exclude` (a typo like `pasword`) throw, and the primary key can't be excluded.
 - `writeWhere` is checked after the write too, so a client can't create a row for another user or move its own row to another user.
 - A row a user can read is not automatically writable: with the config above, other users' public todos can be read but not changed.
+
+## Agent skill
+
+[`skills/offline-first-sync/SKILL.md`](./skills/offline-first-sync/SKILL.md) is a recipe for coding agents (and people) building an app that works offline,
+saves online, and keeps working when the connection comes back. It ships with the package, so it is at
+`node_modules/@sequelize/lite/skills/offline-first-sync/SKILL.md` in your app; copy it to `.agents/skills/` (or your agent's skills folder).
 
 ## Example app
 

@@ -27,7 +27,8 @@
     }
   },
   "files": [
-    "lib"
+    "lib",
+    "skills"
   ],
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
