@@ -41,7 +41,8 @@
     "test": "concurrently \"npm:test-*\"",
     "test-typings": "tsc --noEmit --project tsconfig.json",
     "test-unit": "mocha \"test/unit/**/*.test.ts\" -r ../../test/register-esbuild.js",
-    "test-integration-postgres": "mocha \"test/integration/**/*.test.ts\" -r ../../test/register-esbuild.js"
+    "test-integration-postgres": "mocha \"test/integration/**/*.test.ts\" -r ../../test/register-esbuild.js",
+    "example": "node example/build.mjs && node example/dist/server.js"
   },
   "type": "commonjs",
   "version": "7.0.0-alpha.48",

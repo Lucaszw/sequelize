@@ -1,0 +1,46 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>@sequelize/lite example</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        max-width: 700px;
+        margin: 2em auto;
+      }
+      pre {
+        background: #f4f4f4;
+        padding: 1em;
+        min-height: 2em;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>@sequelize/lite offline todo example</h2>
+    <input id="title" placeholder="todo title" />
+    <button id="add">Add</button>
+    <button id="complete">Complete all</button>
+    <button id="clear">Delete done</button>
+    <button id="sync">Sync to server</button>
+    <p>Pending changes: <b id="pending">?</b></p>
+    <h3>Local (PGlite in IndexedDB)</h3>
+    <pre id="todos"></pre>
+    <h3>Server (Postgres) <button id="refresh">refresh</button></h3>
+    <pre id="server"></pre>
+    <h3>Log</h3>
+    <pre id="log"></pre>
+    <script>
+      async function refresh() {
+        const todos = await (await fetch('/api/todos')).json();
+        document.querySelector('#server').textContent = todos
+          .map(todo => `${todo.done ? '[x]' : '[ ]'} ${todo.title}  (synced ${todo.syncedAt})`)
+          .join('\n');
+      }
+
+      document.querySelector('#refresh').addEventListener('click', refresh);
+      refresh();
+    </script>
+    <script type="module" src="/client.js"></script>
+  </body>
+</html>

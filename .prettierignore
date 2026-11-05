@@ -1,6 +1,7 @@
 .yarn
 /packages/cli/migrations
 /packages/cli/seeds
+/packages/lite/example/dist
 *.tar
 
 /.nx/cache
